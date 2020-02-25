@@ -54,6 +54,7 @@ use crate::{
 	PROTOCOL_VERSION,
 	session::{Session, SessionData}
 };
+use enr::Enr;
 
 type Slab<T> = ::slab::Slab<T, usize>;
 
@@ -288,11 +289,11 @@ impl Host {
 		let keys = if let Some(ref secret) = config.use_secret {
 			KeyPair::from_secret(secret.clone())?
 		} else {
-			config.config_path.clone().and_then(|ref p| load_key(Path::new(&p)))
+			config.config_path.clone().and_then(|ref p| load::<Secret>(Path::new(&p)))
 				.map_or_else(|| {
 				let key = Random.generate();
 				if let Some(path) = config.config_path.clone() {
-					save_key(Path::new(&path), key.secret());
+					save(Path::new(&path), key.secret());
 				}
 				key
 			},
@@ -1218,36 +1219,70 @@ impl IoHandler<NetworkIoMessage> for Host {
 	}
 }
 
-fn save_key(path: &Path, key: &Secret) {
+trait DiskEntity: FromStr {
+	fn path() -> &'static str;
+	fn desc() -> &'static str;
+	fn to_repr(&self) -> String;
+}
+
+impl DiskEntity for Secret {
+	fn path() -> &'static str {
+		"key"
+	}
+	fn desc() -> &'static str {
+		"key file"
+	}
+	fn to_repr(&self) -> String {
+		self.to_hex()
+	}
+}
+
+impl DiskEntity for Enr {
+	fn path() -> &'static str {
+		"enr"
+	}
+	fn desc() -> &'static str {
+		"Ethereum Node Record"
+	}
+	fn to_repr(&self) -> String {
+		self.to_string()
+	}
+}
+
+fn save<E: DiskEntity>(path: &Path, entity: &E) {
 	let mut path_buf = PathBuf::from(path);
 	if let Err(e) = fs::create_dir_all(path_buf.as_path()) {
-		warn!("Error creating key directory: {:?}", e);
+		warn!("Error creating {} directory: {:?}", E::desc(), e);
 		return;
 	};
-	path_buf.push("key");
+	path_buf.push(E::path());
 	let path = path_buf.as_path();
 	let mut file = match fs::File::create(&path) {
 		Ok(file) => file,
 		Err(e) => {
-			warn!("Error creating key file: {:?}", e);
+			warn!("Error creating {}: {:?}", E::desc(), e);
 			return;
 		}
 	};
 	if let Err(e) = restrict_permissions_owner(path, true, false) {
 		warn!(target: "network", "Failed to modify permissions of the file ({})", e);
 	}
-	if let Err(e) = file.write(&key.to_hex().into_bytes()) {
-		warn!("Error writing key file: {:?}", e);
+	if let Err(e) = file.write(&entity.to_repr().into_bytes()) {
+		warn!("Error writing {}: {:?}", E::desc(), e);
 	}
 }
 
-fn load_key(path: &Path) -> Option<Secret> {
+fn load<E>(path: &Path) -> Option<E>
+where
+	E: DiskEntity,
+	<E as std::str::FromStr>::Err: std::fmt::Debug,
+{
 	let mut path_buf = PathBuf::from(path);
-	path_buf.push("key");
+	path_buf.push(E::path());
 	let mut file = match fs::File::open(path_buf.as_path()) {
 		Ok(file) => file,
 		Err(e) => {
-			debug!("Error opening key file: {:?}", e);
+			debug!("Error opening {}: {:?}", E::desc(), e);
 			return None;
 		}
 	};
@@ -1255,14 +1290,14 @@ fn load_key(path: &Path) -> Option<Secret> {
 	match file.read_to_string(&mut buf) {
 		Ok(_) => {},
 		Err(e) => {
-			warn!("Error reading key file: {:?}", e);
+			warn!("Error reading {}: {:?}", E::desc(), e);
 			return None;
 		}
 	}
-	match Secret::from_str(&buf) {
+	match E::from_str(&buf) {
 		Ok(key) => Some(key),
 		Err(e) => {
-			warn!("Error parsing key file: {:?}", e);
+			warn!("Error parsing {}: {:?}", E::desc(), e);
 			None
 		}
 	}
@@ -1274,7 +1309,7 @@ fn key_save_load() {
 
 	let tempdir = TempDir::new("").unwrap();
 	let key = H256::random().into();
-	save_key(tempdir.path(), &key);
+	save(tempdir.path(), &key);
 	let r = load_key(tempdir.path());
 	assert_eq!(key, r.unwrap());
 }
